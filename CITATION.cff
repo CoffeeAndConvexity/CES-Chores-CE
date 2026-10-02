@@ -1,5 +1,5 @@
 cff-version: 1.2.0
-message: "If you use this code, please cite the repository using this metadata."
+message: "If you use this code, please cite the paper listed in preferred-citation."
 type: software
 title: "CES-Chores-CE: Competitive Equilibrium Experiments with Convex CES Disutilities"
 authors:
@@ -7,3 +7,19 @@ authors:
 repository-code: "https://github.com/CoffeeAndConvexity/CES-Chores-CE"
 url: "https://github.com/CoffeeAndConvexity/CES-Chores-CE"
 date-released: 2026-10-02
+preferred-citation:
+  type: article
+  title: "Fully Distributed Tâtonnement for Chores Markets"
+  authors:
+    - family-names: Chaudhury
+      given-names: Bhaskar Ray
+    - family-names: Kroer
+      given-names: Christian
+    - family-names: Mehta
+      given-names: Ruta
+    - family-names: Nan
+      given-names: Tianlong
+  year: 2026
+  journal: arXiv
+  doi: 10.48550/arXiv.2607.00300
+  url: "https://arxiv.org/abs/2607.00300"

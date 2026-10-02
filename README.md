@@ -100,14 +100,16 @@ Tests cover numerical invariants and the refactored experiment and plotting work
 
 ## Citation
 
-If you use this code, cite the repository:
+If you use this code, please cite [Fully Distributed Tâtonnement for Chores Markets](https://arxiv.org/abs/2607.00300):
 
 ```bibtex
-@misc{coffeeandconvexity2026ceschores,
-  author       = {{CoffeeAndConvexity}},
-  title        = {{CES-Chores-CE}: Competitive Equilibrium Experiments with Convex {CES} Disutilities},
-  year         = {2026},
-  howpublished = {GitHub repository},
-  url          = {https://github.com/CoffeeAndConvexity/CES-Chores-CE}
+@misc{chaudhury2026fullydistributedtatonnement,
+  title         = {Fully Distributed T{\^a}tonnement for Chores Markets},
+  author        = {Bhaskar Ray Chaudhury and Christian Kroer and Ruta Mehta and Tianlong Nan},
+  year          = {2026},
+  eprint        = {2607.00300},
+  archivePrefix = {arXiv},
+  primaryClass  = {cs.GT},
+  url           = {https://arxiv.org/abs/2607.00300}
 }
 ```
