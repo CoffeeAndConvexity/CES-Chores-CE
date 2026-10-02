@@ -1,0 +1,4 @@
+method,n_agents,n_resources,rho,instance,eta,0.1,0.05,0.01,0.005,0.001
+multiplicative,100,100,1.2,0,0.0008,,,,,
+multiplicative,100,100,1.2,1,0.018,1146,1286,1779,2034,2712
+multiplicative,100,100,1.2,2,0.0045,2875,3131,4489,5515,8549
