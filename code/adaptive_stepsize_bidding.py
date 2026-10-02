@@ -1,218 +1,224 @@
+"""Compare adaptive-step-size updates on sampled paper-bidding data."""
+
+from __future__ import annotations
+
+import argparse
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
 
-from ces_disutility import compute_excess_supply
+from experiment_utils import (
+    DEFAULT_OUTPUT_DIR,
+    METHODS,
+    REPO_ROOT,
+    RunResult,
+    append_result,
+    ces_rho,
+    compute_update as _compute_update,
+    nonnegative_float,
+    positive_int,
+    run_instance,
+    search_stepsize,
+)
 
-import argparse
-def _parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Search for largest stepsize that doesn't cause blowup.")
-    parser.add_argument("--rho", type=float, default=2.0)
-    parser.add_argument("--num-instances", type=int, default=5)
-    parser.add_argument("--max-steps", type=int, default=10000)
-    parser.add_argument("--noise-level", type=float, default=1)
-    parser.add_argument("--N", type=int, default=100)
-    parser.add_argument("--M", type=int, default=200)
-    return parser.parse_args()
 
-def _compute_update(method: str, prices: np.ndarray, excess_supply: np.ndarray) -> np.ndarray:
-    if method == "additive":
-        return excess_supply - excess_supply.mean()
-    if method == "multiplicative":
-        u = prices * excess_supply
-        return u - u.mean()
-    if method == "quadratic":
-        u = (prices ** 2) * excess_supply
-        return u - u.mean()
-    raise ValueError(f"Unknown method: {method}")
+def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Search for a stable, fast step size on bidding instances."
+    )
+    parser.add_argument("--rho", type=ces_rho, default=2.0)
+    parser.add_argument("--num-instances", type=positive_int, default=5)
+    parser.add_argument("--max-steps", type=positive_int, default=10000)
+    parser.add_argument("--noise-level", type=nonnegative_float, default=1.0)
+    parser.add_argument(
+        "--N", type=positive_int, default=100, help="Number of sampled reviewers."
+    )
+    parser.add_argument(
+        "--M", type=positive_int, default=200, help="Number of sampled papers."
+    )
+    parser.add_argument(
+        "--bidding-data", type=Path, default=REPO_ROOT / "data" / "bidding-data.csv"
+    )
+    parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR)
+    args = parser.parse_args(argv)
+    if not args.bidding_data.is_file():
+        parser.error(f"bidding data does not exist: {args.bidding_data}")
+    return args
 
-def run(D_instance, method: str, eta: float, max_steps: int, instance_seed: int) -> None: 
-    args = _parse_args()
-    rho = args.rho
-    
-    n_agents, n_resources = D_instance.shape
-    B = np.ones(n_agents)
 
-    eps_list = [0.1, 0.05, 0.01, 0.005, 0.001]
-    p0 = np.full(n_resources, B.sum() / n_resources, dtype=float)
-    p = p0.copy()
+def run(
+    D_instance: np.ndarray,
+    method: str,
+    eta: float,
+    max_steps: int,
+    instance_seed: int,
+    *,
+    rho: float = 2.0,
+) -> RunResult:
+    ok, data = run_instance(
+        D_instance, np.ones(D_instance.shape[0]), method, eta, max_steps, rho
+    )
+    return (True, {"instance": instance_seed, **data}) if ok else (False, data)
 
-    hit_iterations = {eps: None for eps in eps_list}
-    for t in range(max_steps):
-        y = compute_excess_supply(p, D_instance, B, rho)
-        update = _compute_update(method, p, y)
-        p = p + eta * update
 
-        # decrease eta if any price goes negative or if any price becomes non-finite (indicating blowup)
-        if np.any(p < 0):
-            return False, "negative prices"
-        if not np.all(np.isfinite(p)):
-            return False, "blowup - nonfinite prices"
-        
-        norm_y = np.linalg.norm(y)
+def search_largest_stepsize(
+    D_instance: np.ndarray,
+    method: str = "multiplicative",
+    max_steps: int = 10000,
+    instance_seed: int = 0,
+    *,
+    rho: float = 2.0,
+) -> tuple[float, dict]:
+    return search_stepsize(
+        lambda eta: run(D_instance, method, eta, max_steps, instance_seed, rho=rho),
+        max_steps,
+    )
 
-        # check if we hit any epsilons, and record the iteration of the first time we hit each epsilon
-        for eps in eps_list:
-            if norm_y <= eps and hit_iterations[eps] is None:
-                hit_iterations[eps] = t
 
-        # increase eta if we have hit all epsilons and haven't had any issues, to speed up convergence
-        if all(hit_iterations[eps] is not None for eps in eps_list):
-            data = {"instance": instance_seed, **hit_iterations}
-            break
-        if t == max_steps - 1:
-            data = {"instance": instance_seed, **hit_iterations}
+def load_bidding_data(path: Path, n_sampled_papers: int) -> np.ndarray:
+    """Encode bids with the original preference and conflict weights."""
+    frame = pd.read_csv(path)
+    columns = ["Bidder", "Submission", "Bid"]
+    if any(column not in frame for column in columns) or frame.empty:
+        raise ValueError(
+            "Bidding data must contain nonempty Bidder, Submission, and Bid columns"
+        )
+    if frame[columns].isna().any().any():
+        raise ValueError(
+            "Bidding data cannot contain missing bidders, submissions, or bids"
+        )
+    submissions = pd.to_numeric(frame["Submission"], errors="coerce")
+    if (
+        not np.isfinite(submissions).all()
+        or (submissions < 1).any()
+        or (submissions % 1 != 0).any()
+    ):
+        raise ValueError("Submission identifiers must be positive integers")
+    preference_values = {
+        "yes": 1,
+        "maybe": 3,
+        "no response": 5,
+        "no": 7,
+        "conflict": 7 * n_sampled_papers + 1,
+    }
+    unknown = set(frame["Bid"]) - preference_values.keys()
+    if unknown:
+        raise ValueError(f"Unknown bid values: {sorted(unknown)}")
+    bidder_indices = {
+        bidder: index for index, bidder in enumerate(dict.fromkeys(frame["Bidder"]))
+    }
+    disutilities = np.full((len(bidder_indices), int(submissions.max())), 5.0)
+    for bidder, submission, bid in frame[columns].itertuples(index=False, name=None):
+        disutilities[bidder_indices[bidder], int(submission) - 1] = preference_values[
+            bid
+        ]
+    return disutilities
 
-    return True, data
 
-def search_largest_stepsize(D_instance, method="multiplicative", max_steps: int = 10000, instance_seed: int = 0) -> np.ndarray:
-    # procedure: 
-    # search for 10 different eta values with equally spaced values between 1e-6 and eta_upper_bound (starting at 10)
-    # update eta_upper_bound to be the smallest eta that causes negative prices or blowup
-    # update best_eta to be the eta that has the best convergence (e.g. smallest average iterations to hit the smallest epsilon)
+def distance_matrix_among_papers(disutilities: np.ndarray) -> np.ndarray:
+    """Squared Euclidean distances, retaining the original summation order."""
+    n_papers = disutilities.shape[1]
+    papers = disutilities.T
+    distances = np.zeros((n_papers, n_papers))
+    for first in range(n_papers):
+        for second in range(n_papers):
+            distances[first, second] = sum((papers[first] - papers[second]) ** 2)
+    return distances
 
-    eta = 1
-    eta_upper_bound = 10
-    best_eta = None
-    second_best_eta = None
-    third_best_eta = None
+
+def sample_bidding_instance(
+    disutilities: np.ndarray,
+    distances: np.ndarray,
+    n_agents: int,
+    n_resources: int,
+    instance_seed: int,
+    noise_level: float,
+) -> np.ndarray:
+    """Preserve seeded rejection sampling and separately reseeded Gaussian noise.
+
+    Check that at least one anchor paper can pass the historical acceptance rule
+    before rejection sampling, so impossible requests cannot loop forever.
+    """
+    if (
+        not 1 <= n_agents <= disutilities.shape[0]
+        or not 1 <= n_resources <= disutilities.shape[1]
+    ):
+        raise ValueError(
+            f"Requested sample ({n_agents}, {n_resources}) exceeds bidding matrix {disutilities.shape}"
+        )
+    if not np.isfinite(noise_level) or noise_level < 0:
+        raise ValueError("noise_level must be finite and nonnegative")
+
+    def sample_for_anchor(anchor: int) -> np.ndarray:
+        nearest = np.argsort(distances[anchor])[:n_resources]
+        response_counts = 1 + np.sum(disutilities[:, nearest] < 5 - 1e-3, axis=1)
+        reviewers = np.flip(np.argsort(response_counts))[:n_agents]
+        return disutilities[np.ix_(reviewers, nearest)]
+
+    def accepted(sample: np.ndarray) -> bool:
+        return bool(np.max(np.min(sample, axis=1)) < 6)
+
+    if not any(
+        accepted(sample_for_anchor(anchor)) for anchor in range(disutilities.shape[1])
+    ):
+        raise ValueError(
+            "No anchor paper produces an acceptable bidding instance at the requested dimensions"
+        )
+    rng = np.random.RandomState(instance_seed)
     while True:
-        eta_list = []
-        eta_ok_list = []
-        eta_convergence_list = []
-        for i in range(9):
-            eta = eta_upper_bound * (i + 1) / 10
-            ok, data = run(D_instance, method=method, eta=eta, max_steps=max_steps, instance_seed=instance_seed)
-            eta_list.append(eta)
-            eta_ok_list.append(ok)
-            if ok:
-                eta_convergence_list.append(data[0.001] if data[0.001] is not None else max_steps + 1)
-            else:
-                eta_convergence_list.append(2 * max_steps + 1)
-        print(eta_list, eta_convergence_list)
-        best_eta = eta_list[np.argsort(eta_convergence_list)[0]]
-        second_best_eta = eta_list[np.argsort(eta_convergence_list)[1]]
-        third_best_eta = eta_list[np.argsort(eta_convergence_list)[2]]
-        if any(not ok for ok in eta_ok_list):
-            eta_upper_bound = min(eta for eta, ok in zip(eta_list, eta_ok_list) if not ok)
-        else:
+        sampled = sample_for_anchor(rng.randint(disutilities.shape[1]))
+        if accepted(sampled):
             break
+    if noise_level > 0:
+        noise_rng = np.random.RandomState(instance_seed)
+        noise = noise_level * noise_rng.normal(size=(n_agents, n_resources))
+        sampled = np.maximum(sampled + noise, 1)
+    return sampled
 
-    ok, data = run(D_instance, method=method, eta=best_eta, max_steps=max_steps, instance_seed=instance_seed)
-    print(data)
-    return best_eta, data
 
-def distance_matrix_among_papers(D): 
+def main(argv: list[str] | None = None) -> None:
+    args = _parse_args(argv)
+    print(f"Loading bidding data from {args.bidding_data}")
+    disutilities = load_bidding_data(args.bidding_data, args.M)
+    if args.N > disutilities.shape[0] or args.M > disutilities.shape[1]:
+        raise ValueError(
+            f"Requested sample ({args.N}, {args.M}) exceeds bidding matrix {disutilities.shape}"
+        )
+    distances = distance_matrix_among_papers(disutilities)
+    for instance_seed in range(args.num_instances):
+        sampled = sample_bidding_instance(
+            disutilities,
+            distances,
+            args.N,
+            args.M,
+            instance_seed,
+            args.noise_level,
+        )
+        print(f"Testing instance {instance_seed} with shape {sampled.shape}")
+        for method in METHODS:
+            best_eta, data = search_largest_stepsize(
+                sampled,
+                method,
+                args.max_steps,
+                instance_seed,
+                rho=args.rho,
+            )
+            append_result(
+                args.output_dir,
+                f"batch_adaptive_stepsize_{method}_bidding.csv",
+                {
+                    "method": method,
+                    "n_agents": args.N,
+                    "n_resources": args.M,
+                    "rho": args.rho,
+                    "instance": instance_seed,
+                    "eta": best_eta,
+                    **data,
+                    "noise_level": args.noise_level,
+                },
+            )
 
-    M = D.shape[1]
-    X = D.T 
-    distance_matrix = np.zeros((M, M))
-    for j in range(M): 
-        for j_ in range(M): 
-            distance_matrix[j][j_] = sum((X[j] - X[j_]) ** 2)
-
-    return distance_matrix 
 
 if __name__ == "__main__":
-
-    print("Loading bidding data...")
-    df = pd.read_csv('./code/bidding-data.csv')
-
-    args = _parse_args()
-    print(f"Arguments: rho={args.rho}, num_instances={args.num_instances}, max_steps={args.max_steps}, noise_level={args.noise_level}, N={args.N}, M={args.M}")
-
-    dict_bidder_index = dict()
-    i = 0
-    for bidder in df['Bidder']:
-        if bidder not in dict_bidder_index.keys():
-            dict_bidder_index[bidder] = i
-            i += 1
-
-    N, M = len(np.unique(df['Bidder'])), max(df['Submission'])
-    print(f"N = {N}, M = {M}")
-    B = np.ones(shape=N)
-
-    dict_pref_value = {
-        'yes': 1,
-        'maybe': 3,
-        'no response': 5,
-        'no': 7,
-        'conflict': 7 * args.M + 1  # optimal price bound?
-    }
-
-    # create D matrix based on the bidding data, where D[i][j] is the value of reviewer i for paper j
-    D = dict_pref_value['no response'] * np.ones(shape=(N, M))
-    for row in list(df.itertuples(index=False, name=None)):
-        D[dict_bidder_index[row[0]]][row[1] - 1] = dict_pref_value[row[2]]
-
-    distance_matrix = distance_matrix_among_papers(D)
-
-    num_instances = args.num_instances
-    seeds = range(num_instances)  # set how many instances we want to try for one size
-    
-    N, M = args.N, args.M
-    
-    for instance_seed in seeds:
-        np.random.seed(instance_seed)
-
-        while True:  # loop utill we obtain a valid instance
-            # randomly pick a paper 
-            j = np.random.randint(D.shape[1])
-
-            # find M-nearest papers
-            M_nearest_neighbors = np.argsort(distance_matrix[j])[:M]
-
-            # select reviewers with most responses 
-            reviewer_num_response = np.ones(D.shape[0], dtype=int)
-            for i in range(D.shape[0]):
-                for j in M_nearest_neighbors: 
-                    if D[i][j] < 5 - 1e-3: 
-                        reviewer_num_response[i] += 1 
-            N_top_response_reviewers = np.flip(np.argsort(reviewer_num_response))[:N] 
-
-            # attain sampled D
-            D_sampled = D[np.ix_(N_top_response_reviewers, M_nearest_neighbors)] 
-
-            if max(np.amin(D_sampled, axis=1)) < 6: 
-                break
-
-        print(f"Testing instance {instance_seed} with shape {D_sampled.shape}")
-
-        # add noise to D_sampled based on noise level argument
-        noise_level = args.noise_level
-        if noise_level > 0:
-            np.random.seed(instance_seed)
-            noise = noise_level * np.random.normal(size=(N, M)) 
-            D_sampled = np.maximum(D_sampled + noise, 1)
-
-        best_eta, data = search_largest_stepsize(D_sampled, method="multiplicative", max_steps=args.max_steps, instance_seed=instance_seed)
-
-        # write to a common CSV file for later plotting (without overwriting previous rows for other methods)
-        df = pd.DataFrame([{"method": "multiplicative", 
-                            "n_agents": N, 
-                            "n_resources": M, 
-                            "rho": args.rho, 
-                            "instance": instance_seed, 
-                            "eta": best_eta, 
-                            **data}])
-        print(df)
-        df.to_csv(f"batch_adaptive_stepsize_multiplicative_bidding.csv", index=False, mode='a', 
-                    header=not pd.io.common.file_exists(f"batch_adaptive_stepsize_multiplicative_bidding.csv"))
-        
-        best_eta, data = search_largest_stepsize(D_sampled, method="additive", max_steps=args.max_steps, instance_seed=instance_seed)
-
-        # write to a common CSV file for later plotting (without overwriting previous rows for other methods)
-        df = pd.DataFrame([{"method": "additive", 
-                            "n_agents": N, 
-                            "n_resources": M, 
-                            "rho": args.rho, 
-                            "instance": instance_seed, 
-                            "eta": best_eta, 
-                            **data}])
-        print(df)
-        df.to_csv(f"batch_adaptive_stepsize_additive_bidding.csv", index=False, mode='a', 
-                    header=not pd.io.common.file_exists(f"batch_adaptive_stepsize_additive_bidding.csv"))
-
-
-
-
-
+    main()

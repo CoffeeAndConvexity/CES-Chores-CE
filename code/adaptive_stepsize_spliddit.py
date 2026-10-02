@@ -1,145 +1,135 @@
+"""Compare adaptive-step-size updates on the bundled Spliddit matrices."""
+
+from __future__ import annotations
+
+import argparse
 from pathlib import Path
 
-import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
-from ces_disutility import compute_excess_supply
+from experiment_utils import (
+    DEFAULT_OUTPUT_DIR,
+    METHODS,
+    REPO_ROOT,
+    RunResult,
+    append_result,
+    ces_rho,
+    compute_update as _compute_update,
+    positive_int,
+    run_instance,
+    search_stepsize,
+    validate_instance,
+)
 
-import argparse
-# rho, max_steps
-def _parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Search for largest stepsize that doesn't cause blowup.")
-    parser.add_argument("--rho", type=float, default=2.0)
-    parser.add_argument("--max-steps", type=int, default=10000)
-    parser.add_argument("--first-instances", type=int, default=20, help="Number of instances to run (starting from the first instance).")
-    return parser.parse_args()
 
-def _compute_update(method: str, prices: np.ndarray, excess_supply: np.ndarray) -> np.ndarray:
-    if method == "additive":
-        return excess_supply - excess_supply.mean()
-    if method == "multiplicative":
-        u = prices * excess_supply
-        return u - u.mean()
-    if method == "quadratic":
-        u = (prices ** 2) * excess_supply
-        return u - u.mean()
-    raise ValueError(f"Unknown method: {method}")
+def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Search for a stable, fast step size on Spliddit instances."
+    )
+    parser.add_argument("--rho", type=ces_rho, default=2.0)
+    parser.add_argument("--max-steps", type=positive_int, default=10000)
+    parser.add_argument(
+        "--first-instances",
+        type=int,
+        default=20,
+        help="Number of instances to run; -1 runs all instances.",
+    )
+    parser.add_argument(
+        "--matrix-dir",
+        type=Path,
+        default=REPO_ROOT / "data" / "distribute_tasks_valuation_matrices",
+    )
+    parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR)
+    args = parser.parse_args(argv)
+    if args.first_instances != -1 and args.first_instances < 1:
+        parser.error("--first-instances must be positive or -1")
+    if not args.matrix_dir.is_dir():
+        parser.error(f"matrix directory does not exist: {args.matrix_dir}")
+    return args
 
-def run(instance, method: str, eta: float, max_steps: int) -> None: 
-    args = _parse_args()
-    D, B = instance
-    n_agents, n_resources = D.shape
-    rho = args.rho
-    
-    eps_list = [0.1, 0.05, 0.01, 0.005, 0.001]
 
-    p0 = np.full(n_resources, B.sum() / n_resources, dtype=float)
-    p = p0.copy()
+def instance_files(matrix_dir: Path) -> list[Path]:
+    """Use index order, then sorted unindexed files; ignore metadata CSVs.
 
-    hit_iterations = {eps: None for eps in eps_list}
-    for t in range(max_steps):
-        y = compute_excess_supply(p, D, B, rho)
-        update = _compute_update(method, p, y)
-        p = p + eta * update
+    Historical results used filesystem enumeration, whose order was unspecified.
+    The matrix_file output column provides a stable identity across copies.
+    """
+    available = {
+        path.name: path
+        for path in matrix_dir.glob("*.csv")
+        if not path.name.startswith("_")
+    }
+    ordered = []
+    index_path = matrix_dir / "_index.csv"
+    if index_path.exists():
+        index = pd.read_csv(index_path)
+        if "matrix_file" not in index:
+            raise ValueError(f"{index_path} must contain a matrix_file column")
+        for name in index["matrix_file"]:
+            if name in available:
+                ordered.append(available.pop(name))
+    ordered.extend(available[name] for name in sorted(available))
+    if not ordered:
+        raise ValueError(f"No instance matrices found in {matrix_dir}")
+    return ordered
 
-        # decrease eta if any price goes negative or if any price becomes non-finite (indicating blowup)
-        if np.any(p < 0):
-            return False, "negative prices"
-        if not np.all(np.isfinite(p)):
-            return False, "blowup - nonfinite prices"
-        
-        norm_y = np.linalg.norm(y)
 
-        # check if we hit any epsilons, and record the iteration of the first time we hit each epsilon
-        for eps in eps_list:
-            if norm_y <= eps and hit_iterations[eps] is None:
-                hit_iterations[eps] = t
+def run(
+    instance: tuple[np.ndarray, np.ndarray],
+    method: str,
+    eta: float,
+    max_steps: int,
+    *,
+    rho: float = 2.0,
+) -> RunResult:
+    return run_instance(*instance, method, eta, max_steps, rho)
 
-        # increase eta if we have hit all epsilons and haven't had any issues, to speed up convergence
-        if all(hit_iterations[eps] is not None for eps in eps_list):
-            data = {**hit_iterations}
-            break
-        if t == max_steps - 1:
-            data = {**hit_iterations}
 
-    return True, data
+def search_largest_stepsize(
+    instance: tuple[np.ndarray, np.ndarray],
+    method: str = "multiplicative",
+    max_steps: int = 10000,
+    *,
+    rho: float = 2.0,
+) -> tuple[float, dict]:
+    return search_stepsize(
+        lambda eta: run(instance, method, eta, max_steps, rho=rho),
+        max_steps,
+        verbose=False,
+    )
 
-def search_largest_stepsize(instance, method="multiplicative", max_steps: int = 10000) -> np.ndarray:
-    # procedure: 
-    # search for 10 different eta values with equally spaced values between 1e-6 and eta_upper_bound (starting at 10)
-    # update eta_upper_bound to be the smallest eta that causes negative prices or blowup
-    # update best_eta to be the eta that has the best convergence (e.g. smallest average iterations to hit the smallest epsilon)
 
-    eta = 1
-    eta_upper_bound = 10
-    best_eta = None
-    second_best_eta = None
-    third_best_eta = None
-    while True:
-        eta_list = []
-        eta_ok_list = []
-        eta_convergence_list = []
-        for i in range(9):
-            eta = eta_upper_bound * (i + 1) / 10
-            ok, data = run(instance, method=method, eta=eta, max_steps=max_steps)
-            eta_list.append(eta)
-            eta_ok_list.append(ok)
-            if ok:
-                eta_convergence_list.append(data[0.001] if data[0.001] is not None else max_steps + 1)
-            else:
-                eta_convergence_list.append(2 * max_steps + 1)
-        best_eta = eta_list[np.argsort(eta_convergence_list)[0]]
-        second_best_eta = eta_list[np.argsort(eta_convergence_list)[1]]
-        third_best_eta = eta_list[np.argsort(eta_convergence_list)[2]]
-        if any(not ok for ok in eta_ok_list):
-            eta_upper_bound = min(eta for eta, ok in zip(eta_list, eta_ok_list) if not ok)
-        else:
-            break
+def main(argv: list[str] | None = None) -> None:
+    args = _parse_args(argv)
+    files = instance_files(args.matrix_dir)
+    if args.first_instances != -1:
+        files = files[: args.first_instances]
+    for method in METHODS:
+        for instance_idx, path in enumerate(files):
+            print(f"Testing {method} on {path.name}")
+            disutilities = pd.read_csv(path, index_col=0).to_numpy(dtype=float)
+            budgets = np.ones(disutilities.shape[0])
+            validate_instance(disutilities, budgets, args.rho)
+            best_eta, data = search_largest_stepsize(
+                (disutilities, budgets),
+                method,
+                args.max_steps,
+                rho=args.rho,
+            )
+            append_result(
+                args.output_dir,
+                f"batch_adaptive_stepsize_{method}_spliddit.csv",
+                {
+                    "method": method,
+                    "instance_idx": instance_idx,
+                    "rho": args.rho,
+                    "eta": best_eta,
+                    **data,
+                    "matrix_file": path.name,
+                },
+            )
 
-    ok, data = run(instance=instance, method=method, eta=best_eta, max_steps=max_steps)
-    print(data)
-    return best_eta, data
 
-# test search_largest_stepsize
 if __name__ == "__main__":
-    # load *all* Spliddit instances from "Spliddit_Data/distribute_tasks_valuation_matrices"
-    current_dir = Path(__file__).resolve().parent
-    
-    path = f"{current_dir}/../Spliddit_Data/distribute_tasks_valuation_matrices"
-    import os
-    instance_files = [f for f in os.listdir(path) if f.endswith(".csv")]
-    instances = []
-    for instance_file in instance_files:
-        if instance_file[0] == "_":
-            continue
-        print(f"Loading instance file: {instance_file}")
-        df = pd.read_csv(os.path.join(path, instance_file), index_col=0)
-        D = df.values
-        B = np.ones(D.shape[0])
-        instances.append((D, B))
-
-    for instance in instances[-5:]:
-        print(f"Testing instance file: {instance}")
-
-    args = _parse_args()
-    rho = args.rho
-    max_steps = args.max_steps
-    if args.first_instances == -1:
-        first_instances = len(instances)
-    else:
-        first_instances = args.first_instances
-    for method in ["multiplicative", "additive"]:
-        for instance_idx, instance in enumerate(instances[:first_instances]):
-            # run the search for largest stepsize on this instance
-            best_eta, data = search_largest_stepsize(instance=instance, method=method, max_steps=max_steps)
-
-            # write to a common CSV file for later plotting (without overwriting previous rows for other methods)
-            df = pd.DataFrame([{"method": method, 
-                                "instance_idx": instance_idx,
-                                "rho": rho, 
-                                "eta": best_eta, 
-                                **data}])
-            
-            df.to_csv(f"batch_adaptive_stepsize_{method}_spliddit.csv", index=False, mode='a', 
-                      header=not pd.io.common.file_exists(f"batch_adaptive_stepsize_{method}_spliddit.csv"))
+    main()

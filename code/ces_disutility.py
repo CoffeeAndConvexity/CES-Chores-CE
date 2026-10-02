@@ -39,12 +39,16 @@ def _enforce_walras_law(
 
     walras_gap = float(prices @ excess_supply)
     walras_gap_mean = float(np.mean(prices * excess_supply))
-    gap_scale = atol + rtol * float(np.linalg.norm(prices) * np.linalg.norm(excess_supply))
+    gap_scale = atol + rtol * float(
+        np.linalg.norm(prices) * np.linalg.norm(excess_supply)
+    )
     if abs(walras_gap) <= gap_scale:
         alpha = walras_gap_mean / mean_price_sq
         corrected = excess_supply - alpha * prices
         corrected_gap = float(prices @ corrected)
-        if abs(corrected_gap) <= atol + rtol * float(np.linalg.norm(prices) * np.linalg.norm(corrected)):
+        if abs(corrected_gap) <= atol + rtol * float(
+            np.linalg.norm(prices) * np.linalg.norm(corrected)
+        ):
             return corrected
         return corrected - ((corrected_gap / prices.size) / mean_price_sq) * prices
 
@@ -141,7 +145,9 @@ def compute_ces_demand(
     if m == 0:
         if earning_requirement == 0:
             return np.array([], dtype=float)
-        raise ValueError("infeasible: empty vectors cannot satisfy positive earning requirement")
+        raise ValueError(
+            "infeasible: empty vectors cannot satisfy positive earning requirement"
+        )
 
     if earning_requirement == 0:
         return np.zeros(m, dtype=float)
@@ -153,7 +159,9 @@ def compute_ces_demand(
 
     positive_price_mask = p > 0
     if not np.any(positive_price_mask):
-        raise ValueError("infeasible: all prices are zero but earning_requirement is positive")
+        raise ValueError(
+            "infeasible: all prices are zero but earning_requirement is positive"
+        )
 
     # If any positive-price good has zero disutility weight, minimum disutility is 0.
     zero_disutility_positive_price_mask = positive_price_mask & (d == 0)
@@ -168,10 +176,12 @@ def compute_ces_demand(
 
     p_pos = p[positive_price_mask]
     d_pos = d[positive_price_mask]
-    denominator = float(np.sum((p_pos ** sigma) * (d_pos ** (-sigma))))
+    denominator = float(np.sum((p_pos**sigma) * (d_pos ** (-sigma))))
 
     if denominator <= 0:
-        raise ValueError("infeasible: could not compute a positive CES demand denominator")
+        raise ValueError(
+            "infeasible: could not compute a positive CES demand denominator"
+        )
 
     demand = np.zeros(m, dtype=float)
     numerators = (p_pos ** (sigma - 1.0)) * (d_pos ** (-sigma))
@@ -243,14 +253,14 @@ def compute_excess_supply(
 
     sigma = rho / (rho - 1.0)
 
-    p_pos = p[positive_price_mask]           # (m_pos,)
-    D_pos = D[:, positive_price_mask]        # (n, m_pos)
+    p_pos = p[positive_price_mask]  # (m_pos,)
+    D_pos = D[:, positive_price_mask]  # (n, m_pos)
 
     # denominators[i] = sum_j p_j^sigma * d_ij^(-sigma)
-    denominators = (D_pos ** (-sigma)) @ (p_pos ** sigma)   # (n,)
+    denominators = (D_pos ** (-sigma)) @ (p_pos**sigma)  # (n,)
 
     # numerators[i, j] = p_j^(sigma-1) * d_ij^(-sigma)
-    numerators = (p_pos ** (sigma - 1.0)) * (D_pos ** (-sigma))   # (n, m_pos)
+    numerators = (p_pos ** (sigma - 1.0)) * (D_pos ** (-sigma))  # (n, m_pos)
 
     # demands[i, j] = B_i * numerators[i, j] / denominators[i]
     demands_pos = B[:, None] * numerators / denominators[:, None]  # (n, m_pos)
@@ -313,17 +323,13 @@ def run_tatonnement(
 
     prices[0] = p0
     for t in range(num_steps):
-        z, demands_pos = compute_excess_supply(prices[t], disutility_weights, earning_requirements, rho)
+        z = compute_excess_supply(
+            prices[t], disutility_weights, earning_requirements, rho
+        )
         z = _enforce_walras_law(prices[t], z)
         excess_supplies[t] = z
         relative_z = z - z.mean()
         prices[t + 1] = np.maximum(prices[t] + eta * relative_z, 1e-12)
-
-        if t % (num_steps // 10) == 0 or t == num_steps - 1:
-            print("prices: ", prices[t])
-            print("sum of prices: ", prices[t].sum())
-            print("dot(z, prices): ", sum(z * prices[t]))
-            print("excess supply: ", z)
 
     return prices, excess_supplies
 
@@ -381,7 +387,9 @@ def run_multiplicative_tatonnement(
 
     prices[0] = p0
     for t in range(num_steps):
-        z, _ = compute_excess_supply(prices[t], disutility_weights, earning_requirements, rho)
+        z = compute_excess_supply(
+            prices[t], disutility_weights, earning_requirements, rho
+        )
         z = _enforce_walras_law(prices[t], z)
         excess_supplies[t] = z
         update_term = prices[t] * z
@@ -423,7 +431,9 @@ def run_quadratic_price_tatonnement(
 
     prices[0] = p0
     for t in range(num_steps):
-        z, _ = compute_excess_supply(prices[t], disutility_weights, earning_requirements, rho)
+        z = compute_excess_supply(
+            prices[t], disutility_weights, earning_requirements, rho
+        )
         z = _enforce_walras_law(prices[t], z)
         excess_supplies[t] = z
         update_term = (prices[t] ** 2) * z
@@ -445,6 +455,6 @@ if __name__ == "__main__":
     print(compute_ces_demand(prices, weights, earning_requirement, rho))
 
     # Excess supply: two agents with the same weight matrix and equal earning requirements.
-    D = np.vstack([weights, weights])          # (2, 4)
+    D = np.vstack([weights, weights])  # (2, 4)
     B = np.array([10.0, 10.0])
     print(compute_excess_supply(prices, D, B, rho))

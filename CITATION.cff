@@ -1,0 +1,9 @@
+cff-version: 1.2.0
+message: "If you use this code, please cite the repository using this metadata."
+type: software
+title: "CES-Chores-CE: Competitive Equilibrium Experiments with Convex CES Disutilities"
+authors:
+  - name: CoffeeAndConvexity
+repository-code: "https://github.com/CoffeeAndConvexity/CES-Chores-CE"
+url: "https://github.com/CoffeeAndConvexity/CES-Chores-CE"
+date-released: 2026-10-02
